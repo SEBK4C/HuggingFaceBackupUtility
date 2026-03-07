@@ -128,8 +128,6 @@ class HFClient:
                 revision=revision,
                 repo_type=repo_type,
                 token=self.token,
-                resume_download=True,
-                local_dir_use_symlinks=False,
             )
 
         result_path = await loop.run_in_executor(None, _download)

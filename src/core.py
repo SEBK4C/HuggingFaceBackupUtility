@@ -137,7 +137,8 @@ class HFMirrorCore:
                 gitea_name,
                 f"Mirror {repo_id} @ {upstream_commit}",
             )
-        except GiteaError as e:
+        except Exception as e:
+            logger.warning("Gitea push failed: %s", e)
             warnings.append(f"Gitea push failed: {e}")
             commit_sha = None
 

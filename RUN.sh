@@ -354,6 +354,31 @@ create_gitea_admin() {
             --email "admin@localhost" \
             --admin \
             --config "$(pwd)/$GITEA_DATA_DIR/app.ini" 2>&1 || true
+
+        # Generate API token for the admin user
+        GITEA_PORT=$(grep '^GITEA_PORT=' "$ENV_FILE" | cut -d= -f2 | tr -d '"')
+        GITEA_PORT="${GITEA_PORT:-3000}"
+        info "Generating Gitea API token..."
+        TOKEN_RESPONSE=$(curl -sf -X POST \
+            "http://localhost:${GITEA_PORT}/api/v1/users/${admin_user}/tokens" \
+            -u "${admin_user}:${admin_pass}" \
+            -H "Content-Type: application/json" \
+            -d '{"name":"hfmirror-auto","scopes":["all"]}' 2>&1) || true
+
+        if [ -n "$TOKEN_RESPONSE" ]; then
+            API_TOKEN=$(echo "$TOKEN_RESPONSE" | grep -o '"sha1":"[^"]*"' | cut -d'"' -f4)
+            if [ -n "$API_TOKEN" ]; then
+                # Save token to .env
+                if grep -q '^GITEA_API_TOKEN=' "$ENV_FILE" 2>/dev/null; then
+                    sed -i.bak "s|^GITEA_API_TOKEN=.*|GITEA_API_TOKEN=\"${API_TOKEN}\"|" "$ENV_FILE"
+                    rm -f "${ENV_FILE}.bak"
+                else
+                    echo "GITEA_API_TOKEN=\"${API_TOKEN}\"" >> "$ENV_FILE"
+                fi
+                ok "Gitea API token saved to .env"
+            fi
+        fi
+
         touch "$admin_marker"
         ok "Gitea admin user ready."
     else
