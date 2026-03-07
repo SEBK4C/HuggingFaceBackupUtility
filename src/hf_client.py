@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 class HFClient:
     def __init__(self, config: AppConfig):
         self.config = config
-        self.token = config.hf_token.get_secret_value()
+        self.token = config.hf_token.get_secret_value() or None
         self.api = HfApi(token=self.token)
 
     async def fetch_manifest(
