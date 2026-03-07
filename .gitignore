@@ -1,0 +1,11 @@
+.env
+.venv/
+gitea-data/
+bin/
+.bin/
+run/
+downloads/
+*.log
+__pycache__/
+*.pyc
+.pytest_cache/
