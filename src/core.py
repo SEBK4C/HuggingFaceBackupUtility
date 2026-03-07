@@ -342,11 +342,87 @@ class HFMirrorCore:
             except Exception as e:
                 logger.warning("Failed to migrate %s: %s", filename, e)
 
+        # Update the repo record to reflect the new tier2 path
+        if files_moved > 0 and request.target_tier == "tier2":
+            tier2_path = ensure_repo_dirs(self.config, request.repo_id, "tier2")
+            repo.tier2_path = tier2_path
+            await self.state_db.upsert_repo(repo)
+        elif files_moved > 0 and request.target_tier == "tier1":
+            # Check if any symlinks remain; if not, clear tier2_path
+            has_symlinks = any(
+                f.is_symlink()
+                for f in repo.tier1_path.rglob("*")
+                if f.is_file()
+            )
+            if not has_symlinks:
+                repo.tier2_path = None
+                await self.state_db.upsert_repo(repo)
+
         return MigrateResult(
             repo_id=request.repo_id,
             files_moved=files_moved,
             bytes_moved=total_moved,
             symlinks_created=symlinks_created,
+            duration_seconds=time.time() - start_time,
+        )
+
+    async def copy_to_drive2(self, repo_id: str) -> MigrateResult:
+        """Copy files to Drive 2 without replacing originals with symlinks.
+
+        Keeps real files on both drives for redundancy.
+        """
+        start_time = time.time()
+        repo = await self.state_db.get_repo(repo_id)
+        if repo is None:
+            raise HFMirrorError(f"Repo {repo_id} not found")
+        if not repo.tier1_path or not repo.tier1_path.exists():
+            raise HFMirrorError(f"Drive 1 path not found: {repo.tier1_path}")
+        if self.config.tier2_path is None:
+            raise HFMirrorError("Drive 2 path not configured")
+
+        tier2_dir = ensure_repo_dirs(self.config, repo_id, "tier2")
+        skip_dirs = {".git", ".cache"}
+        total_copied = 0
+        files_copied = 0
+
+        for fpath in repo.tier1_path.rglob("*"):
+            if not fpath.is_file():
+                continue
+            rel = fpath.relative_to(repo.tier1_path)
+            if any(part in skip_dirs for part in rel.parts):
+                continue
+
+            # Get the real file (follow symlinks if needed)
+            if fpath.is_symlink():
+                real_file = fpath.resolve()
+                if not real_file.exists():
+                    logger.warning("Dangling symlink, skipping: %s", fpath)
+                    continue
+            else:
+                real_file = fpath
+
+            dest = tier2_dir / rel
+            if dest.exists() and dest.stat().st_size == real_file.stat().st_size:
+                continue  # Already on Drive 2
+
+            try:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(str(real_file), str(dest))
+                total_copied += real_file.stat().st_size
+                files_copied += 1
+            except Exception as e:
+                logger.warning("Failed to copy %s to Drive 2: %s", rel, e)
+
+        # Update DB
+        if files_copied > 0:
+            repo.tier2_path = tier2_dir
+            await self.state_db.upsert_repo(repo)
+
+        return MigrateResult(
+            repo_id=repo_id,
+            files_moved=files_copied,
+            bytes_moved=total_copied,
+            symlinks_created=0,
             duration_seconds=time.time() - start_time,
         )
 
@@ -436,25 +512,25 @@ class HFMirrorCore:
             message="Gitea is reachable" if gitea_ok else "Gitea is not reachable",
         ))
 
-        # Check Tier 1 storage
+        # Check Drive 1 storage
         self.config.tier1_path.mkdir(parents=True, exist_ok=True)
         usage = shutil.disk_usage(self.config.tier1_path)
         pct_used = (usage.used / usage.total) * 100
         checks.append(HealthCheck(
-            name="Tier 1 Storage",
+            name="Drive 1 Storage",
             passed=True,
-            message=f"Tier 1 OK: {pct_used:.1f}% used, {usage.free / (1024**3):.1f} GB free",
+            message=f"Drive 1 OK: {pct_used:.1f}% used, {usage.free / (1024**3):.1f} GB free",
         ))
 
-        # Check Tier 2 storage
+        # Check Drive 2 storage
         if self.config.tier2_path:
             self.config.tier2_path.mkdir(parents=True, exist_ok=True)
             usage = shutil.disk_usage(self.config.tier2_path)
             pct_used = (usage.used / usage.total) * 100
             checks.append(HealthCheck(
-                name="Tier 2 Storage",
+                name="Drive 2 Storage",
                 passed=True,
-                message=f"Tier 2 OK: {pct_used:.1f}% used, {usage.free / (1024**3):.1f} GB free",
+                message=f"Drive 2 OK: {pct_used:.1f}% used, {usage.free / (1024**3):.1f} GB free",
             ))
 
         # Check symlink health
@@ -478,7 +554,7 @@ class HFMirrorCore:
                 message=(
                     "No orphaned blobs"
                     if len(orphans) == 0
-                    else f"{len(orphans)} orphaned blob(s) on Tier 2"
+                    else f"{len(orphans)} orphaned blob(s) on Drive 2"
                 ),
                 details=[str(p) for p in orphans],
             ))

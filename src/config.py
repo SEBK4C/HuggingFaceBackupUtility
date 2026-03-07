@@ -25,8 +25,8 @@ def load_config() -> AppConfig:
 
     return AppConfig(
         hf_token=env.get("HF_TOKEN", ""),
-        tier1_path=Path(env.get("TIER1_PATH", "./downloads")),
-        tier2_path=Path(tier2) if tier2 else None,
+        tier1_path=Path(env.get("TIER1_PATH", "./downloads")).expanduser().resolve(),
+        tier2_path=Path(tier2).expanduser().resolve() if tier2 else None,
         tier_threshold_percent=int(env.get("TIER_THRESHOLD_PERCENT", "10")),
         gitea_port=int(env.get("GITEA_PORT", "3000")),
         gitea_admin_user=env.get("GITEA_ADMIN_USER", "hfmirror"),

@@ -225,9 +225,9 @@ async def migrate_file(
         dest.parent.mkdir(parents=True, exist_ok=True)
         size = source.stat().st_size
         shutil.copy2(str(source), str(dest))
-        # Replace source with symlink
+        # Replace source with symlink (use absolute path for reliable resolution)
         source.unlink()
-        source.symlink_to(dest)
+        source.symlink_to(dest.resolve())
         clear_migration_journal(config)
         return size
 

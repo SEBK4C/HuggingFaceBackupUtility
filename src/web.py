@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import shutil
 
 import gradio as gr
@@ -18,6 +19,11 @@ from .models import (
 
 config = load_config()
 core = None
+
+
+def _drive_label(drive: str) -> str:
+    """Map internal tier names to user-facing Drive labels."""
+    return {"tier1": "Drive 1", "tier2": "Drive 2"}.get(drive, drive)
 
 
 async def get_core():
@@ -37,29 +43,57 @@ async def refresh_dashboard():
 
     rows = []
     for repo in result.repos:
-        tier = "tier2" if repo.tier2_path else "tier1"
+        location = _describe_location(repo)
         synced = str(repo.last_synced)[:19] if repo.last_synced else "never"
         size_gb = repo.total_size_bytes / (1024**3)
         rows.append([
             repo.repo_id,
             repo.state.value,
             f"{size_gb:.1f} GB",
-            tier,
+            location,
             synced,
         ])
 
     return rows
 
 
+def _describe_location(repo):
+    """Describe where a repo's files live (Drive 1, Drive 2, or both)."""
+    has_drive1_files = False
+    has_drive2_files = False
+
+    if repo.tier1_path and repo.tier1_path.exists():
+        skip_dirs = {".git", ".cache"}
+        for fpath in repo.tier1_path.rglob("*"):
+            if not fpath.is_file():
+                continue
+            rel = fpath.relative_to(repo.tier1_path)
+            if any(part in skip_dirs for part in rel.parts):
+                continue
+            if fpath.is_symlink():
+                has_drive2_files = True
+            else:
+                has_drive1_files = True
+            if has_drive1_files and has_drive2_files:
+                break
+
+    if has_drive1_files and has_drive2_files:
+        return "Drive 1 + Drive 2"
+    elif has_drive2_files:
+        return "Drive 2 (symlinked)"
+    else:
+        return "Drive 1"
+
+
 # --- Clone Tab ---
 
-async def clone_repo(repo_id: str, revision: str, force_tier: str):
+async def clone_repo(repo_id: str, revision: str, force_drive: str):
     if not repo_id.strip():
         yield "Please enter a repo ID."
         return
 
     c = await get_core()
-    ft = force_tier if force_tier != "auto" else None
+    ft = None if force_drive == "auto" else force_drive
     request = CloneRequest(repo_id=repo_id.strip(), revision=revision, force_tier=ft)
 
     output_lines = []
@@ -118,45 +152,128 @@ async def get_storage_info():
     c = await get_core()
     lines = []
 
-    # Tier 1
+    # Drive 1
     config.tier1_path.mkdir(parents=True, exist_ok=True)
     usage = shutil.disk_usage(config.tier1_path)
     pct = usage.used / usage.total * 100
-    lines.append(f"Tier 1 ({config.tier1_path}): {pct:.1f}% used, {usage.free / (1024**3):.1f} GB free")
+    lines.append(f"Drive 1 ({config.tier1_path}): {pct:.1f}% used, {usage.free / (1024**3):.1f} GB free")
 
-    # Tier 2
+    # Drive 2
     if config.tier2_path:
         config.tier2_path.mkdir(parents=True, exist_ok=True)
         usage = shutil.disk_usage(config.tier2_path)
         pct = usage.used / usage.total * 100
-        lines.append(f"Tier 2 ({config.tier2_path}): {pct:.1f}% used, {usage.free / (1024**3):.1f} GB free")
+        lines.append(f"Drive 2 ({config.tier2_path}): {pct:.1f}% used, {usage.free / (1024**3):.1f} GB free")
     else:
-        lines.append("Tier 2: Not configured")
+        lines.append("Drive 2: Not configured")
 
-    # Per-repo breakdown
+    # Per-repo breakdown with file location details
     result = await c.list_repos()
     if result.repos:
         lines.append("\nPer-repo breakdown:")
         for repo in result.repos:
             size_gb = repo.total_size_bytes / (1024**3)
-            tier = "tier2" if repo.tier2_path else "tier1"
-            lines.append(f"  {repo.repo_id}: {size_gb:.1f} GB ({tier})")
+            location = _describe_location(repo)
+            lines.append(f"  {repo.repo_id}: {size_gb:.1f} GB ({location})")
 
     return "\n".join(lines)
 
 
-async def do_migrate(repo_id: str, target_tier: str):
-    if not repo_id.strip():
-        return "Please enter a repo ID."
+async def get_repo_choices():
+    """Return list of repo IDs for the migrate dropdown."""
     c = await get_core()
-    result = await c.migrate(
-        MigrateRequest(repo_id=repo_id.strip(), target_tier=target_tier)
-    )
-    return (
-        f"Migrated {result.files_moved} files ({result.bytes_moved / (1024**3):.2f} GB)\n"
-        f"Symlinks created: {result.symlinks_created}\n"
-        f"Duration: {result.duration_seconds:.1f}s"
-    )
+    result = await c.list_repos()
+    return [repo.repo_id for repo in result.repos]
+
+
+async def get_repo_file_info(repo_id: str):
+    """Show per-file breakdown of where each file lives."""
+    if not repo_id:
+        return []
+
+    c = await get_core()
+    repo = await c.get_repo_status(repo_id)
+    if repo is None or not repo.tier1_path or not repo.tier1_path.exists():
+        return []
+
+    skip_dirs = {".git", ".cache"}
+    rows = []
+    for fpath in sorted(repo.tier1_path.rglob("*")):
+        if not fpath.is_file():
+            continue
+        rel = fpath.relative_to(repo.tier1_path)
+        if any(part in skip_dirs for part in rel.parts):
+            continue
+
+        if fpath.is_symlink():
+            target = fpath.resolve()
+            size = target.stat().st_size if target.exists() else 0
+            size_str = _fmt_size(size)
+            location = "Drive 2 (symlink)"
+            drive2_path = str(target)
+        else:
+            size = fpath.stat().st_size
+            size_str = _fmt_size(size)
+            # Check if a copy also exists on drive 2
+            if config.tier2_path:
+                from .storage import repo_id_to_dirname
+                d2 = config.tier2_path / repo_id_to_dirname(repo_id) / rel
+                if d2.exists() and not d2.is_symlink():
+                    location = "Both drives"
+                    drive2_path = str(d2)
+                else:
+                    location = "Drive 1 only"
+                    drive2_path = "-"
+            else:
+                location = "Drive 1 only"
+                drive2_path = "-"
+
+        rows.append([str(rel), size_str, location])
+
+    return rows
+
+
+def _fmt_size(size_bytes: int) -> str:
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if abs(size_bytes) < 1024:
+            return f"{size_bytes:.1f} {unit}"
+        size_bytes /= 1024
+    return f"{size_bytes:.1f} PB"
+
+
+async def do_migrate(repo_id: str, action: str):
+    if not repo_id:
+        return "Please select a repository."
+    c = await get_core()
+
+    # Map action to internal target_tier and mode
+    if action == "Move to Drive 2 (symlink on Drive 1)":
+        result = await c.migrate(
+            MigrateRequest(repo_id=repo_id, target_tier="tier2")
+        )
+        return (
+            f"Moved {result.files_moved} files ({result.bytes_moved / (1024**3):.2f} GB) to Drive 2\n"
+            f"Symlinks created on Drive 1: {result.symlinks_created}\n"
+            f"Duration: {result.duration_seconds:.1f}s"
+        )
+    elif action == "Move to Drive 1 (remove symlinks)":
+        result = await c.migrate(
+            MigrateRequest(repo_id=repo_id, target_tier="tier1")
+        )
+        return (
+            f"Recalled {result.files_moved} files ({result.bytes_moved / (1024**3):.2f} GB) to Drive 1\n"
+            f"Symlinks removed: {result.files_moved}\n"
+            f"Duration: {result.duration_seconds:.1f}s"
+        )
+    elif action == "Copy to Drive 2 (keep on both)":
+        result = await c.copy_to_drive2(repo_id)
+        return (
+            f"Copied {result.files_moved} files ({result.bytes_moved / (1024**3):.2f} GB) to Drive 2\n"
+            f"Files exist on both drives (no symlinks)\n"
+            f"Duration: {result.duration_seconds:.1f}s"
+        )
+    else:
+        return f"Unknown action: {action}"
 
 
 # --- Health Tab ---
@@ -237,7 +354,7 @@ def create_app() -> gr.Blocks:
 
         with gr.Tab("Dashboard"):
             dashboard_table = gr.Dataframe(
-                headers=["Repository", "State", "Size", "LFS Tier", "Last Synced"],
+                headers=["Repository", "State", "Size", "Location", "Last Synced"],
                 label="Mirrored Repositories",
             )
             refresh_btn = gr.Button("Refresh")
@@ -250,16 +367,16 @@ def create_app() -> gr.Blocks:
                     placeholder="meta-llama/Llama-3.1-70B",
                 )
                 clone_revision = gr.Textbox(label="Revision", value="main")
-                clone_tier = gr.Radio(
+                clone_drive = gr.Radio(
                     choices=["auto", "tier1", "tier2"],
-                    label="Tier Override",
+                    label="Drive Override",
                     value="auto",
                 )
             clone_btn = gr.Button("Clone", variant="primary")
             clone_output = gr.Textbox(label="Progress", lines=15, interactive=False)
             clone_btn.click(
                 fn=clone_repo,
-                inputs=[clone_repo_id, clone_revision, clone_tier],
+                inputs=[clone_repo_id, clone_revision, clone_drive],
                 outputs=clone_output,
             )
 
@@ -276,26 +393,50 @@ def create_app() -> gr.Blocks:
 
         with gr.Tab("Storage"):
             storage_info = gr.Textbox(
-                label="Storage Overview", lines=15, interactive=False
+                label="Storage Overview", lines=10, interactive=False
             )
             storage_refresh_btn = gr.Button("Refresh Storage Info")
             storage_refresh_btn.click(fn=get_storage_info, outputs=storage_info)
 
-            gr.Markdown("### Migrate Files")
+            gr.Markdown("### Manage Files")
             with gr.Row():
-                migrate_repo_id = gr.Textbox(label="Repository ID")
-                migrate_tier = gr.Radio(
-                    choices=["tier1", "tier2"],
-                    label="Target Tier",
-                    value="tier2",
+                migrate_repo_dd = gr.Dropdown(
+                    label="Repository", choices=[], interactive=True,
                 )
-            migrate_btn = gr.Button("Migrate")
+                migrate_action = gr.Radio(
+                    choices=[
+                        "Move to Drive 2 (symlink on Drive 1)",
+                        "Move to Drive 1 (remove symlinks)",
+                        "Copy to Drive 2 (keep on both)",
+                    ],
+                    label="Action",
+                    value="Move to Drive 2 (symlink on Drive 1)",
+                )
+            migrate_btn = gr.Button("Run", variant="primary")
             migrate_output = gr.Textbox(
-                label="Migration Result", lines=5, interactive=False
+                label="Result", lines=5, interactive=False
+            )
+
+            gr.Markdown("### File Locations")
+            file_table = gr.Dataframe(
+                headers=["File", "Size", "Location"],
+                label="Per-file breakdown",
+            )
+
+            # Wire up: refresh dropdown when storage tab loads
+            storage_refresh_btn.click(
+                fn=get_repo_choices,
+                outputs=migrate_repo_dd,
+            )
+            # Show file locations when repo is selected
+            migrate_repo_dd.change(
+                fn=get_repo_file_info,
+                inputs=migrate_repo_dd,
+                outputs=file_table,
             )
             migrate_btn.click(
                 fn=do_migrate,
-                inputs=[migrate_repo_id, migrate_tier],
+                inputs=[migrate_repo_dd, migrate_action],
                 outputs=migrate_output,
             )
 
@@ -313,11 +454,11 @@ def create_app() -> gr.Blocks:
                     value=config.hf_token.get_secret_value() or "",
                 )
                 s_tier1 = gr.Textbox(
-                    label="TIER1_PATH",
+                    label="DRIVE_1_PATH",
                     value=str(config.tier1_path),
                 )
                 s_tier2 = gr.Textbox(
-                    label="TIER2_PATH (optional)",
+                    label="DRIVE_2_PATH (optional)",
                     value=str(config.tier2_path) if config.tier2_path else "",
                 )
                 s_gitea_port = gr.Number(

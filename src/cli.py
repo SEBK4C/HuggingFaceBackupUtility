@@ -27,7 +27,7 @@ def _run(coro):
 def clone(
     repo_id: str = typer.Argument(..., help="HF repo ID, e.g. meta-llama/Llama-3.1-70B"),
     revision: str = typer.Option("main", help="Branch/tag/commit to clone"),
-    force_tier: Optional[str] = typer.Option(None, help="Force routing to tier1 or tier2"),
+    force_tier: Optional[str] = typer.Option(None, help="Force routing to drive1 or drive2 (tier1/tier2)"),
 ):
     """Clone a Hugging Face repository and mirror to Gitea."""
     async def _clone():
@@ -185,10 +185,10 @@ def update(
 @app.command()
 def migrate(
     repo_id: str = typer.Argument(..., help="HF repo ID"),
-    to: str = typer.Option(..., "--to", help="Target tier: tier1 or tier2"),
+    to: str = typer.Option(..., "--to", help="Target drive: drive1/tier1 or drive2/tier2"),
     files: Optional[str] = typer.Option(None, help="Glob pattern for files to migrate"),
 ):
-    """Migrate files between storage tiers."""
+    """Migrate files between drives."""
     async def _migrate():
         config = load_config()
         core = await init_core(config)
@@ -268,8 +268,8 @@ def setup():
 
     values = {}
     values["HF_TOKEN"] = typer.prompt("Hugging Face token (hf_...)")
-    values["TIER1_PATH"] = typer.prompt("Tier 1 storage path", default="./downloads")
-    tier2 = typer.prompt("Tier 2 storage path (leave empty to disable)", default="")
+    values["TIER1_PATH"] = typer.prompt("Drive 1 storage path", default="./downloads")
+    tier2 = typer.prompt("Drive 2 storage path (leave empty to disable)", default="")
     if tier2:
         values["TIER2_PATH"] = tier2
     values["GITEA_PORT"] = typer.prompt("Gitea port", default="3000")
@@ -319,7 +319,7 @@ def _print_repo_table(repos):
     table.add_column("Repository")
     table.add_column("State")
     table.add_column("Size")
-    table.add_column("LFS Tier")
+    table.add_column("Location")
     table.add_column("Last Synced")
 
     state_icons = {
@@ -333,13 +333,13 @@ def _print_repo_table(repos):
     }
 
     for repo in repos:
-        tier = "tier2" if repo.tier2_path else "tier1"
+        location = "Drive 2" if repo.tier2_path else "Drive 1"
         synced = _fmt_time_ago(repo.last_synced) if repo.last_synced else "never"
         table.add_row(
             repo.repo_id,
             state_icons.get(repo.state, str(repo.state)),
             _fmt_size(repo.total_size_bytes),
-            tier,
+            location,
             synced,
         )
 
@@ -352,8 +352,8 @@ def _print_repo_detail(repo):
     console.print(f"  Gitea name:      {repo.gitea_repo_name}")
     console.print(f"  Total size:      {_fmt_size(repo.total_size_bytes)}")
     console.print(f"  LFS size:        {_fmt_size(repo.lfs_size_bytes)}")
-    console.print(f"  Tier 1 path:     {repo.tier1_path}")
-    console.print(f"  Tier 2 path:     {repo.tier2_path or 'N/A'}")
+    console.print(f"  Drive 1 path:    {repo.tier1_path}")
+    console.print(f"  Drive 2 path:    {repo.tier2_path or 'N/A'}")
     console.print(f"  Upstream commit: {repo.upstream_commit or 'unknown'}")
     console.print(f"  Local commit:    {repo.local_commit or 'unknown'}")
     console.print(f"  Last checked:    {repo.last_checked or 'never'}")
