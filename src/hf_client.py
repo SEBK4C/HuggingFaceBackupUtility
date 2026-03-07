@@ -3,17 +3,15 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import logging
-import os
 import time
 from pathlib import Path
 from typing import AsyncIterator
 
-from huggingface_hub import HfApi, hf_hub_download
-from huggingface_hub.utils import EntryNotFoundError, RepositoryNotFoundError
+from huggingface_hub import HfApi, snapshot_download
+from huggingface_hub.utils import RepositoryNotFoundError
 
-from .errors import AuthenticationError, IntegrityError, RateLimitError
+from .errors import AuthenticationError, RateLimitError
 from .models import (
     AppConfig,
     CloneProgress,
@@ -106,28 +104,29 @@ class HFClient:
         )
         return info.sha
 
-    async def download_file(
+    async def download_repo_snapshot(
         self,
         repo_id: str,
-        filename: str,
-        local_dir: Path,
+        download_dir: Path,
         revision: str = "main",
         repo_type: str = "model",
     ) -> Path:
-        """Download a single file from HF Hub with resume support.
+        """Download entire repo using snapshot_download.
 
-        Returns the path to the downloaded file.
+        Uses huggingface_hub's built-in parallelism, resume, and progress bars.
+        Returns the local directory path.
         """
         loop = asyncio.get_event_loop()
+        max_workers = self.config.hf_concurrent_downloads
 
         def _download() -> str:
-            return hf_hub_download(
+            return snapshot_download(
                 repo_id=repo_id,
-                filename=filename,
-                local_dir=str(local_dir),
+                local_dir=str(download_dir),
                 revision=revision,
                 repo_type=repo_type,
                 token=self.token,
+                max_workers=max_workers,
             )
 
         result_path = await loop.run_in_executor(None, _download)
@@ -142,69 +141,40 @@ class HFClient:
         revision: str = "main",
         repo_type: str = "model",
     ) -> AsyncIterator[CloneProgress]:
-        """Download all files in a manifest, yielding progress updates."""
+        """Download all repo files using snapshot_download, yielding progress updates."""
         total_files = len(manifest.files)
-        completed = 0
         total_bytes = manifest.total_size
-        downloaded_bytes = 0
         start_time = time.time()
-        warnings: list[str] = []
 
-        for file_info in manifest.files:
-            async with semaphore:
-                yield CloneProgress(
-                    phase="download",
-                    file_name=file_info.rfilename,
-                    bytes_downloaded=downloaded_bytes,
-                    bytes_total=total_bytes,
-                    files_completed=completed,
-                    files_total=total_files,
-                    message=f"Downloading {file_info.rfilename}",
-                )
+        yield CloneProgress(
+            phase="download",
+            bytes_downloaded=0,
+            bytes_total=total_bytes,
+            files_completed=0,
+            files_total=total_files,
+            message=f"Downloading {repo_id} ({total_files} files, {total_bytes / 1024**3:.1f} GB)...",
+        )
 
-                retries = self.config.hf_retry_attempts
-                for attempt in range(retries):
-                    try:
-                        await self.download_file(
-                            repo_id,
-                            file_info.rfilename,
-                            download_dir,
-                            revision=revision,
-                            repo_type=repo_type,
-                        )
-                        break
-                    except Exception as e:
-                        if attempt < retries - 1:
-                            wait = self.config.hf_retry_backoff_base ** attempt
-                            logger.warning(
-                                "Retry %d/%d for %s: %s (waiting %.1fs)",
-                                attempt + 1,
-                                retries,
-                                file_info.rfilename,
-                                e,
-                                wait,
-                            )
-                            await asyncio.sleep(wait)
-                        else:
-                            msg = f"Failed to download {file_info.rfilename} after {retries} attempts: {e}"
-                            logger.error(msg)
-                            warnings.append(msg)
+        try:
+            await self.download_repo_snapshot(
+                repo_id, download_dir, revision=revision, repo_type=repo_type
+            )
+        except Exception as e:
+            yield CloneProgress(
+                phase="error",
+                message=f"Download failed: {e}",
+            )
+            return
 
-                downloaded_bytes += file_info.size
-                completed += 1
-                elapsed = time.time() - start_time
-                speed = downloaded_bytes / elapsed if elapsed > 0 else 0
-                remaining = total_bytes - downloaded_bytes
-                eta = remaining / speed if speed > 0 else None
+        elapsed = time.time() - start_time
+        speed = total_bytes / elapsed if elapsed > 0 else 0
 
-                yield CloneProgress(
-                    phase="download",
-                    file_name=file_info.rfilename,
-                    bytes_downloaded=downloaded_bytes,
-                    bytes_total=total_bytes,
-                    files_completed=completed,
-                    files_total=total_files,
-                    speed_bytes_sec=speed,
-                    eta_seconds=eta,
-                    message=f"Completed {file_info.rfilename}",
-                )
+        yield CloneProgress(
+            phase="download",
+            bytes_downloaded=total_bytes,
+            bytes_total=total_bytes,
+            files_completed=total_files,
+            files_total=total_files,
+            speed_bytes_sec=speed,
+            message=f"Downloaded {total_files} files in {elapsed:.0f}s ({speed / 1024**2:.1f} MB/s)",
+        )
