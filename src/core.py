@@ -289,46 +289,58 @@ class HFMirrorCore:
     # --- Migrate ---
 
     async def migrate(self, request: MigrateRequest) -> MigrateResult:
-        """Migrate files between storage tiers."""
+        """Migrate files between storage tiers.
+
+        Scans the filesystem directly so it works even when file_records
+        table is empty (e.g. after snapshot_download).
+        """
         start_time = time.time()
         repo = await self.state_db.get_repo(request.repo_id)
         if repo is None:
             raise HFMirrorError(f"Repo {request.repo_id} not found")
 
-        file_records = await self.state_db.list_file_records(request.repo_id)
-        files_to_migrate = file_records
+        if not repo.tier1_path or not repo.tier1_path.exists():
+            raise HFMirrorError(f"Tier 1 path not found: {repo.tier1_path}")
+
+        # Scan filesystem for real files to migrate (skip symlinks, .git, .cache)
+        skip_dirs = {".git", ".cache"}
+        files_on_disk: list[str] = []
+        for fpath in repo.tier1_path.rglob("*"):
+            if fpath.is_file() and not fpath.is_symlink():
+                # Skip files inside .git / .cache directories
+                rel = fpath.relative_to(repo.tier1_path)
+                if any(part in skip_dirs for part in rel.parts):
+                    continue
+                files_on_disk.append(str(rel))
+
+        # Filter if specific files requested
         if request.files:
+            import fnmatch
             files_to_migrate = [
-                f for f in file_records if f["rfilename"] in request.files
+                f for f in files_on_disk
+                if any(fnmatch.fnmatch(f, pat) for pat in request.files)
             ]
         else:
-            # Migrate only LFS files by default
-            files_to_migrate = [f for f in file_records if f["is_lfs"]]
+            files_to_migrate = files_on_disk
 
         total_moved = 0
         files_moved = 0
         symlinks_created = 0
 
-        for record in files_to_migrate:
-            bytes_moved = await migrate_file(
-                self.config,
-                request.repo_id,
-                record["rfilename"],
-                request.target_tier,
-            )
-            total_moved += bytes_moved
-            files_moved += 1
-            if request.target_tier == "tier2":
-                symlinks_created += 1
-
-            await self.state_db.upsert_file_record(
-                repo_id=request.repo_id,
-                rfilename=record["rfilename"],
-                blob_id=record["blob_id"],
-                size_bytes=record["size_bytes"],
-                is_lfs=record["is_lfs"],
-                storage_tier=request.target_tier,
-            )
+        for filename in files_to_migrate:
+            try:
+                bytes_moved = await migrate_file(
+                    self.config,
+                    request.repo_id,
+                    filename,
+                    request.target_tier,
+                )
+                total_moved += bytes_moved
+                files_moved += 1
+                if request.target_tier == "tier2":
+                    symlinks_created += 1
+            except Exception as e:
+                logger.warning("Failed to migrate %s: %s", filename, e)
 
         return MigrateResult(
             repo_id=request.repo_id,
