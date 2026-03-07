@@ -312,18 +312,31 @@ def create_app() -> gr.Blocks:
 
         with gr.Tab("Settings"):
             with gr.Column():
-                s_token = gr.Textbox(label="HF_TOKEN", type="password")
-                s_tier1 = gr.Textbox(label="TIER1_PATH", value="./downloads")
-                s_tier2 = gr.Textbox(label="TIER2_PATH (optional)")
-                s_gitea_port = gr.Number(label="GITEA_PORT", value=3000)
+                s_token = gr.Textbox(
+                    label="HF_TOKEN", type="password",
+                    value=config.hf_token.get_secret_value() or "",
+                )
+                s_tier1 = gr.Textbox(
+                    label="TIER1_PATH",
+                    value=str(config.tier1_path),
+                )
+                s_tier2 = gr.Textbox(
+                    label="TIER2_PATH (optional)",
+                    value=str(config.tier2_path) if config.tier2_path else "",
+                )
+                s_gitea_port = gr.Number(
+                    label="GITEA_PORT",
+                    value=config.gitea_port,
+                )
                 s_concurrent = gr.Slider(
                     label="HF_CONCURRENT_DOWNLOADS",
-                    minimum=1, maximum=16, step=1, value=4,
+                    minimum=1, maximum=16, step=1,
+                    value=config.hf_concurrent_downloads,
                 )
                 s_log_level = gr.Radio(
                     choices=["DEBUG", "INFO", "WARNING", "ERROR"],
                     label="LOG_LEVEL",
-                    value="INFO",
+                    value=config.log_level,
                 )
             with gr.Row():
                 save_btn = gr.Button("Save Settings", variant="primary")
