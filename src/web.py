@@ -183,7 +183,8 @@ async def get_repo_choices():
     """Return list of repo IDs for the migrate dropdown."""
     c = await get_core()
     result = await c.list_repos()
-    return [repo.repo_id for repo in result.repos]
+    choices = [repo.repo_id for repo in result.repos]
+    return gr.update(choices=choices)
 
 
 async def get_repo_file_info(repo_id: str):
@@ -402,6 +403,7 @@ def create_app() -> gr.Blocks:
             with gr.Row():
                 migrate_repo_dd = gr.Dropdown(
                     label="Repository", choices=[], interactive=True,
+                    allow_custom_value=True,
                 )
                 migrate_action = gr.Radio(
                     choices=[
