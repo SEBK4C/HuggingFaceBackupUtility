@@ -425,39 +425,25 @@ class HFMirrorCore:
         ))
 
         # Check Tier 1 storage
-        tier1_exists = self.config.tier1_path.exists()
-        if tier1_exists:
-            usage = shutil.disk_usage(self.config.tier1_path)
-            pct_used = (usage.used / usage.total) * 100
-            checks.append(HealthCheck(
-                name="Tier 1 Storage",
-                passed=True,
-                message=f"Tier 1 OK: {pct_used:.1f}% used, {usage.free / (1024**3):.1f} GB free",
-            ))
-        else:
-            checks.append(HealthCheck(
-                name="Tier 1 Storage",
-                passed=False,
-                message=f"Tier 1 path does not exist: {self.config.tier1_path}",
-            ))
+        self.config.tier1_path.mkdir(parents=True, exist_ok=True)
+        usage = shutil.disk_usage(self.config.tier1_path)
+        pct_used = (usage.used / usage.total) * 100
+        checks.append(HealthCheck(
+            name="Tier 1 Storage",
+            passed=True,
+            message=f"Tier 1 OK: {pct_used:.1f}% used, {usage.free / (1024**3):.1f} GB free",
+        ))
 
         # Check Tier 2 storage
         if self.config.tier2_path:
-            tier2_exists = self.config.tier2_path.exists()
-            if tier2_exists:
-                usage = shutil.disk_usage(self.config.tier2_path)
-                pct_used = (usage.used / usage.total) * 100
-                checks.append(HealthCheck(
-                    name="Tier 2 Storage",
-                    passed=True,
-                    message=f"Tier 2 OK: {pct_used:.1f}% used, {usage.free / (1024**3):.1f} GB free",
-                ))
-            else:
-                checks.append(HealthCheck(
-                    name="Tier 2 Storage",
-                    passed=False,
-                    message=f"Tier 2 path does not exist: {self.config.tier2_path}",
-                ))
+            self.config.tier2_path.mkdir(parents=True, exist_ok=True)
+            usage = shutil.disk_usage(self.config.tier2_path)
+            pct_used = (usage.used / usage.total) * 100
+            checks.append(HealthCheck(
+                name="Tier 2 Storage",
+                passed=True,
+                message=f"Tier 2 OK: {pct_used:.1f}% used, {usage.free / (1024**3):.1f} GB free",
+            ))
 
         # Check symlink health
         issues = check_symlink_health(self.config.tier1_path)

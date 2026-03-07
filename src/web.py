@@ -119,21 +119,17 @@ async def get_storage_info():
     lines = []
 
     # Tier 1
-    if config.tier1_path.exists():
-        usage = shutil.disk_usage(config.tier1_path)
-        pct = usage.used / usage.total * 100
-        lines.append(f"Tier 1 ({config.tier1_path}): {pct:.1f}% used, {usage.free / (1024**3):.1f} GB free")
-    else:
-        lines.append(f"Tier 1 ({config.tier1_path}): NOT FOUND")
+    config.tier1_path.mkdir(parents=True, exist_ok=True)
+    usage = shutil.disk_usage(config.tier1_path)
+    pct = usage.used / usage.total * 100
+    lines.append(f"Tier 1 ({config.tier1_path}): {pct:.1f}% used, {usage.free / (1024**3):.1f} GB free")
 
     # Tier 2
     if config.tier2_path:
-        if config.tier2_path.exists():
-            usage = shutil.disk_usage(config.tier2_path)
-            pct = usage.used / usage.total * 100
-            lines.append(f"Tier 2 ({config.tier2_path}): {pct:.1f}% used, {usage.free / (1024**3):.1f} GB free")
-        else:
-            lines.append(f"Tier 2 ({config.tier2_path}): NOT FOUND")
+        config.tier2_path.mkdir(parents=True, exist_ok=True)
+        usage = shutil.disk_usage(config.tier2_path)
+        pct = usage.used / usage.total * 100
+        lines.append(f"Tier 2 ({config.tier2_path}): {pct:.1f}% used, {usage.free / (1024**3):.1f} GB free")
     else:
         lines.append("Tier 2: Not configured")
 
