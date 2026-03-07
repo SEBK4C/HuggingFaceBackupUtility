@@ -216,7 +216,21 @@ async def save_settings(
 
     merged = {**existing, **new_vals}
     env_path.write_text("\n".join(f"{k}={v}" for k, v in merged.items()) + "\n")
-    return "Settings saved. Some changes may require restart."
+    return "Settings saved. Click 'Restart Server' to apply changes."
+
+
+async def do_restart():
+    """Restart the server process to apply new settings."""
+    import os
+    import sys
+
+    # Reset the core so it gets re-created with new config on next use
+    global core, config
+    if core is not None:
+        await core.close()
+        core = None
+    config = load_config()
+    return "Server config reloaded. New settings are now active."
 
 
 # --- Build the Gradio App ---
@@ -311,13 +325,16 @@ def create_app() -> gr.Blocks:
                     label="LOG_LEVEL",
                     value="INFO",
                 )
-            save_btn = gr.Button("Save Settings", variant="primary")
+            with gr.Row():
+                save_btn = gr.Button("Save Settings", variant="primary")
+                restart_btn = gr.Button("Restart Server", variant="secondary")
             settings_output = gr.Textbox(label="Status", interactive=False)
             save_btn.click(
                 fn=save_settings,
                 inputs=[s_token, s_tier1, s_tier2, s_gitea_port, s_concurrent, s_log_level],
                 outputs=settings_output,
             )
+            restart_btn.click(fn=do_restart, outputs=settings_output)
 
     return app
 

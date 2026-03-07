@@ -287,6 +287,15 @@ def setup():
     console.print("Run [bold]./run.sh web[/bold] or [bold]./run.sh cli clone <repo>[/bold] to get started.")
 
 
+@app.command()
+def restart():
+    """Restart the application to apply new settings."""
+    import os
+    import sys
+    console.print("[yellow]Restarting...[/yellow]")
+    os.execv(sys.executable, [sys.executable] + sys.argv)
+
+
 @app.command(name="open")
 def open_repo(repo_id: str = typer.Argument(..., help="HF repo ID")):
     """Print the Gitea URL for a mirrored repository."""
