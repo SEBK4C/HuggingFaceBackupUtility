@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import subprocess
 from pathlib import Path
 
@@ -19,8 +20,10 @@ DB_TYPE  = sqlite3
 PATH     = {data_dir}/gitea.db
 
 [server]
-HTTP_PORT = {port}
-ROOT_URL  = {base_url}
+HTTP_PORT        = {port}
+ROOT_URL         = {base_url}
+LFS_START_SERVER = true
+LFS_JWT_SECRET   = {lfs_jwt_secret}
 
 [lfs]
 PATH = {data_dir}/lfs
@@ -71,10 +74,13 @@ class GiteaClient:
     @staticmethod
     def generate_app_ini(config: AppConfig, data_dir: Path) -> str:
         """Generate Gitea app.ini content."""
+        import secrets
+        lfs_jwt_secret = secrets.token_urlsafe(32)
         return INI_TEMPLATE.format(
             data_dir=data_dir.resolve(),
             port=config.gitea_port,
             base_url=config.gitea_base_url,
+            lfs_jwt_secret=lfs_jwt_secret,
         )
 
     @classmethod
@@ -228,19 +234,26 @@ class GiteaClient:
 
         loop = asyncio.get_event_loop()
 
-        async def run_git(*args: str) -> subprocess.CompletedProcess:
+        # Ensure .bin/ (local git-lfs) is on PATH for subprocess calls
+        env = os.environ.copy()
+        local_bin = str(Path(".bin").resolve())
+        env["PATH"] = local_bin + os.pathsep + env.get("PATH", "")
+
+        async def run_git(*args: str, check: bool = True) -> subprocess.CompletedProcess:
             cmd = ["git"] + list(args)
             result = await loop.run_in_executor(
                 None,
                 lambda: subprocess.run(
-                    cmd, cwd=str(work_dir), capture_output=True, text=True
+                    cmd, cwd=str(work_dir), capture_output=True, text=True,
+                    env=env,
                 ),
             )
-            if result.returncode != 0:
+            if check and result.returncode != 0:
                 raise GiteaError(f"git {' '.join(args)} failed: {result.stderr}")
             return result
 
-        await run_git("init", "--initial-branch=main")
+        # Init (safe to re-run)
+        await run_git("init", "--initial-branch=main", check=False)
         await run_git("lfs", "install", "--local")
 
         # Track LFS patterns
@@ -248,9 +261,25 @@ class GiteaClient:
             await run_git("lfs", "track", pattern)
 
         await run_git("add", "-A")
-        await run_git("commit", "-m", commit_message)
-        await run_git("remote", "add", "origin", remote_url)
-        await run_git("push", "-u", "origin", "main")
+
+        # Commit (skip if nothing to commit)
+        status = await run_git("status", "--porcelain")
+        if status.stdout.strip():
+            await run_git("commit", "-m", commit_message)
+        else:
+            # Check if there are any commits at all
+            head = await run_git("rev-parse", "HEAD", check=False)
+            if head.returncode != 0:
+                await run_git("commit", "--allow-empty", "-m", commit_message)
+
+        # Set remote (update if exists)
+        existing = await run_git("remote", "get-url", "origin", check=False)
+        if existing.returncode == 0:
+            await run_git("remote", "set-url", "origin", remote_url)
+        else:
+            await run_git("remote", "add", "origin", remote_url)
+
+        await run_git("push", "-u", "origin", "main", "--force")
 
         # Get commit SHA
         result = await run_git("rev-parse", "HEAD")

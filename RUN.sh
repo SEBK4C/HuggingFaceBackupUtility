@@ -304,14 +304,20 @@ ensure_gitea_initialized() {
         local data_abs
         data_abs="$(cd "$GITEA_DATA_DIR" && pwd)"
 
+        # Generate LFS JWT secret
+        local lfs_jwt_secret
+        lfs_jwt_secret=$("$BIN_DIR/gitea" generate secret JWT_SECRET 2>/dev/null || head -c 32 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9_-' | head -c 43)
+
         cat > "$ini_path" <<EOINI
 [database]
 DB_TYPE  = sqlite3
 PATH     = ${data_abs}/gitea.db
 
 [server]
-HTTP_PORT = ${GITEA_PORT}
-ROOT_URL  = ${base_url}
+HTTP_PORT        = ${GITEA_PORT}
+ROOT_URL         = ${base_url}
+LFS_START_SERVER = true
+LFS_JWT_SECRET   = ${lfs_jwt_secret}
 
 [lfs]
 PATH = ${data_abs}/lfs
