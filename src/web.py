@@ -14,8 +14,6 @@ from .models import (
     CloneRequest,
     DiffRequest,
     MigrateRequest,
-    MirrorState,
-    PruneRequest,
 )
 
 config = load_config()
@@ -43,18 +41,6 @@ def _validate_repo_id(repo_id: str) -> str | None:
     if "\x00" in repo_id or "\n" in repo_id or "\r" in repo_id:
         return None
     return repo_id
-
-
-def _sanitize_env_value(value: str) -> str:
-    """Strip characters that could break the .env line format.
-
-    .env values are single-line key=value.  Newlines, null bytes, or
-    unescaped quotes could corrupt the file or allow value injection.
-    """
-    # Remove null bytes and newlines entirely
-    value = value.replace("\x00", "").replace("\r", "").replace("\n", "")
-    # Trim leading/trailing whitespace
-    return value.strip()
 
 
 def _drive_label(drive: str) -> str:
@@ -126,7 +112,7 @@ def _describe_location(repo):
 async def clone_repo(repo_id: str, revision: str, force_drive: str):
     safe_id = _validate_repo_id(repo_id or "")
     if not safe_id:
-        yield "Invalid repository ID. Expected format: owner/repo-name (e.g. meta-llama/Llama-3.1-70B)."
+        yield "Please enter a valid repository ID. Expected format: owner/repo-name (e.g. meta-llama/Llama-3.1-70B)."
         return
 
     c = await get_core()
@@ -161,7 +147,7 @@ async def clone_repo(repo_id: str, revision: str, force_drive: str):
 async def check_diff(repo_id: str):
     safe_id = _validate_repo_id(repo_id or "")
     if not safe_id:
-        return "Invalid repository ID. Expected format: owner/repo-name (e.g. meta-llama/Llama-3.1-70B)."
+        return "Please enter a valid repository ID. Expected format: owner/repo-name (e.g. meta-llama/Llama-3.1-70B)."
 
     c = await get_core()
     result = await c.diff(DiffRequest(repo_id=safe_id))
@@ -288,7 +274,7 @@ def _fmt_size(size_bytes: int) -> str:
 async def do_migrate(repo_id: str, action: str):
     safe_id = _validate_repo_id(repo_id or "")
     if not safe_id:
-        return "Invalid repository ID. Expected format: owner/repo-name."
+        return "Please select or enter a valid repository ID. Expected format: owner/repo-name."
     c = await get_core()
     repo_id = safe_id
 
@@ -356,18 +342,16 @@ async def save_settings(
     tier2_path = _sanitize(tier2_path)
     log_level = _sanitize(log_level)
 
-    env_lines = [
-        f"TIER1_PATH={tier1_path}",
-    ]
+    new_vals: dict[str, str] = {
+        "TIER1_PATH": tier1_path,
+        "GITEA_PORT": str(int(gitea_port)),
+        "HF_CONCURRENT_DOWNLOADS": str(int(hf_concurrent)),
+        "LOG_LEVEL": log_level,
+    }
     if hf_token:
-        env_lines.insert(0, f"HF_TOKEN={hf_token}")
+        new_vals["HF_TOKEN"] = hf_token
     if tier2_path:
-        env_lines.append(f"TIER2_PATH={tier2_path}")
-    env_lines.extend([
-        f"GITEA_PORT={gitea_port}",
-        f"HF_CONCURRENT_DOWNLOADS={hf_concurrent}",
-        f"LOG_LEVEL={log_level}",
-    ])
+        new_vals["TIER2_PATH"] = tier2_path
 
     # Preserve existing values not shown in the form
     env_path = Path(".env")
