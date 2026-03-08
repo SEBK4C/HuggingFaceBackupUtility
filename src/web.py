@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import shutil
 
 import gradio as gr
@@ -19,6 +20,41 @@ from .models import (
 
 config = load_config()
 core = None
+
+# HuggingFace repo IDs are `owner/repo-name` where each segment is
+# alphanumeric, hyphens, underscores, or dots.  Max 200 chars total.
+_REPO_ID_RE = re.compile(r"^[\w][\w.\-]{0,97}/[\w][\w.\-]{0,97}$")
+
+
+def _validate_repo_id(repo_id: str) -> str | None:
+    """Return sanitized repo_id or None if invalid.
+
+    Returns None to signal callers to reject the input.  We intentionally
+    avoid raising exceptions in Gradio handlers — returning an error string
+    is the correct Gradio pattern.
+    """
+    if not repo_id or len(repo_id) > 200:
+        return None
+    # Strip surrounding whitespace (common user error)
+    repo_id = repo_id.strip()
+    if not _REPO_ID_RE.match(repo_id):
+        return None
+    # Reject null bytes and path separators beyond the single required slash
+    if "\x00" in repo_id or "\n" in repo_id or "\r" in repo_id:
+        return None
+    return repo_id
+
+
+def _sanitize_env_value(value: str) -> str:
+    """Strip characters that could break the .env line format.
+
+    .env values are single-line key=value.  Newlines, null bytes, or
+    unescaped quotes could corrupt the file or allow value injection.
+    """
+    # Remove null bytes and newlines entirely
+    value = value.replace("\x00", "").replace("\r", "").replace("\n", "")
+    # Trim leading/trailing whitespace
+    return value.strip()
 
 
 def _drive_label(drive: str) -> str:
@@ -88,13 +124,14 @@ def _describe_location(repo):
 # --- Clone Tab ---
 
 async def clone_repo(repo_id: str, revision: str, force_drive: str):
-    if not repo_id.strip():
-        yield "Please enter a repo ID."
+    safe_id = _validate_repo_id(repo_id or "")
+    if not safe_id:
+        yield "Invalid repository ID. Expected format: owner/repo-name (e.g. meta-llama/Llama-3.1-70B)."
         return
 
     c = await get_core()
     ft = None if force_drive == "auto" else force_drive
-    request = CloneRequest(repo_id=repo_id.strip(), revision=revision, force_tier=ft)
+    request = CloneRequest(repo_id=safe_id, revision=revision, force_tier=ft)
 
     output_lines = []
     async for progress in c.clone(request):
@@ -122,11 +159,12 @@ async def clone_repo(repo_id: str, revision: str, force_drive: str):
 # --- Diff Tab ---
 
 async def check_diff(repo_id: str):
-    if not repo_id.strip():
-        return "Please enter a repo ID."
+    safe_id = _validate_repo_id(repo_id or "")
+    if not safe_id:
+        return "Invalid repository ID. Expected format: owner/repo-name (e.g. meta-llama/Llama-3.1-70B)."
 
     c = await get_core()
-    result = await c.diff(DiffRequest(repo_id=repo_id.strip()))
+    result = await c.diff(DiffRequest(repo_id=safe_id))
 
     lines = []
     if result.is_up_to_date:
@@ -189,45 +227,50 @@ async def get_repo_choices():
 
 async def get_repo_file_info(repo_id: str):
     """Show per-file breakdown of where each file lives."""
-    if not repo_id:
+    safe_id = _validate_repo_id(repo_id or "")
+    if not safe_id:
         return []
 
     c = await get_core()
-    repo = await c.get_repo_status(repo_id)
+    repo = await c.get_repo_status(safe_id)
     if repo is None or not repo.tier1_path or not repo.tier1_path.exists():
         return []
 
+    base = repo.tier1_path.resolve()
     skip_dirs = {".git", ".cache"}
     rows = []
     for fpath in sorted(repo.tier1_path.rglob("*")):
         if not fpath.is_file():
             continue
-        rel = fpath.relative_to(repo.tier1_path)
+        try:
+            rel = fpath.resolve().relative_to(base) if not fpath.is_symlink() else fpath.relative_to(repo.tier1_path)
+        except ValueError:
+            # Path escaped the repo directory — skip silently
+            continue
         if any(part in skip_dirs for part in rel.parts):
             continue
 
         if fpath.is_symlink():
             target = fpath.resolve()
+            # Ensure symlink target stays within expected tier2 path
+            if config.tier2_path and not str(target).startswith(str(config.tier2_path.resolve())):
+                continue
             size = target.stat().st_size if target.exists() else 0
             size_str = _fmt_size(size)
             location = "Drive 2 (symlink)"
-            drive2_path = str(target)
         else:
             size = fpath.stat().st_size
             size_str = _fmt_size(size)
             # Check if a copy also exists on drive 2
             if config.tier2_path:
                 from .storage import repo_id_to_dirname
-                d2 = config.tier2_path / repo_id_to_dirname(repo_id) / rel
+                d2 = config.tier2_path / repo_id_to_dirname(safe_id) / rel
                 if d2.exists() and not d2.is_symlink():
                     location = "Both drives"
-                    drive2_path = str(d2)
                 else:
                     location = "Drive 1 only"
-                    drive2_path = "-"
             else:
                 location = "Drive 1 only"
-                drive2_path = "-"
 
         rows.append([str(rel), size_str, location])
 
@@ -243,9 +286,11 @@ def _fmt_size(size_bytes: int) -> str:
 
 
 async def do_migrate(repo_id: str, action: str):
-    if not repo_id:
-        return "Please select a repository."
+    safe_id = _validate_repo_id(repo_id or "")
+    if not safe_id:
+        return "Invalid repository ID. Expected format: owner/repo-name."
     c = await get_core()
+    repo_id = safe_id
 
     # Map action to internal target_tier and mode
     if action == "Move to Drive 2 (symlink on Drive 1)":
@@ -302,31 +347,36 @@ async def save_settings(
 ):
     from pathlib import Path
 
-    env_lines = [
-        f"HF_TOKEN={hf_token}",
-        f"TIER1_PATH={tier1_path}",
-    ]
-    if tier2_path:
-        env_lines.append(f"TIER2_PATH={tier2_path}")
-    env_lines.extend([
-        f"GITEA_PORT={gitea_port}",
-        f"HF_CONCURRENT_DOWNLOADS={hf_concurrent}",
-        f"LOG_LEVEL={log_level}",
-    ])
+    # Sanitize all user-supplied values before writing to .env.
+    # This prevents newline injection (e.g. token="x\nSECRET=pwned") and
+    # null-byte injection that could corrupt the file or environment.
+    s_token = _sanitize_env_value(str(hf_token))
+    s_tier1 = _sanitize_env_value(str(tier1_path))
+    s_tier2 = _sanitize_env_value(str(tier2_path)) if tier2_path else ""
+    s_port = _sanitize_env_value(str(int(gitea_port)))  # int() rejects non-numeric
+    s_concurrent = _sanitize_env_value(str(int(hf_concurrent)))
+    # log_level comes from a Radio — validate against allowlist
+    allowed_levels = {"DEBUG", "INFO", "WARNING", "ERROR"}
+    s_log_level = log_level if log_level in allowed_levels else "INFO"
+
+    new_vals: dict[str, str] = {
+        "HF_TOKEN": s_token,
+        "TIER1_PATH": s_tier1,
+        "GITEA_PORT": s_port,
+        "HF_CONCURRENT_DOWNLOADS": s_concurrent,
+        "LOG_LEVEL": s_log_level,
+    }
+    if s_tier2:
+        new_vals["TIER2_PATH"] = s_tier2
 
     # Preserve existing values not shown in the form
     env_path = Path(".env")
-    existing = {}
+    existing: dict[str, str] = {}
     if env_path.exists():
         for line in env_path.read_text().splitlines():
             if "=" in line and not line.startswith("#"):
                 k, v = line.split("=", 1)
                 existing[k.strip()] = v.strip()
-
-    new_vals = {}
-    for line in env_lines:
-        k, v = line.split("=", 1)
-        new_vals[k] = v
 
     merged = {**existing, **new_vals}
     env_path.write_text("\n".join(f"{k}={v}" for k, v in merged.items()) + "\n")
