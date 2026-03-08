@@ -347,27 +347,26 @@ async def save_settings(
 ):
     from pathlib import Path
 
-    # Sanitize all user-supplied values before writing to .env.
-    # This prevents newline injection (e.g. token="x\nSECRET=pwned") and
-    # null-byte injection that could corrupt the file or environment.
-    s_token = _sanitize_env_value(str(hf_token))
-    s_tier1 = _sanitize_env_value(str(tier1_path))
-    s_tier2 = _sanitize_env_value(str(tier2_path)) if tier2_path else ""
-    s_port = _sanitize_env_value(str(int(gitea_port)))  # int() rejects non-numeric
-    s_concurrent = _sanitize_env_value(str(int(hf_concurrent)))
-    # log_level comes from a Radio — validate against allowlist
-    allowed_levels = {"DEBUG", "INFO", "WARNING", "ERROR"}
-    s_log_level = log_level if log_level in allowed_levels else "INFO"
+    # Strip newlines to prevent env-file injection
+    def _sanitize(v: str) -> str:
+        return str(v).replace("\r", "").replace("\n", "")
 
-    new_vals: dict[str, str] = {
-        "HF_TOKEN": s_token,
-        "TIER1_PATH": s_tier1,
-        "GITEA_PORT": s_port,
-        "HF_CONCURRENT_DOWNLOADS": s_concurrent,
-        "LOG_LEVEL": s_log_level,
-    }
-    if s_tier2:
-        new_vals["TIER2_PATH"] = s_tier2
+    hf_token = _sanitize(hf_token)
+    tier1_path = _sanitize(tier1_path)
+    tier2_path = _sanitize(tier2_path)
+    log_level = _sanitize(log_level)
+
+    env_lines = [
+        f"HF_TOKEN={hf_token}",
+        f"TIER1_PATH={tier1_path}",
+    ]
+    if tier2_path:
+        env_lines.append(f"TIER2_PATH={tier2_path}")
+    env_lines.extend([
+        f"GITEA_PORT={gitea_port}",
+        f"HF_CONCURRENT_DOWNLOADS={hf_concurrent}",
+        f"LOG_LEVEL={log_level}",
+    ])
 
     # Preserve existing values not shown in the form
     env_path = Path(".env")
@@ -545,7 +544,7 @@ def launch_web(port: int = 7860, share: bool = False):
     """Entry point called by main.py."""
     app = create_app()
     app.launch(
-        server_name="0.0.0.0",
+        server_name="127.0.0.1",
         server_port=port,
         share=share,
     )
