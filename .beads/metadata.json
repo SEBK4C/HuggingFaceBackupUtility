@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "server",
+  "dolt_database": "HuggingFaceBackupUtility",
+  "project_id": "6295c61e-5015-4061-bf93-eef6acac4aa5"
+}
