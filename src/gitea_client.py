@@ -107,7 +107,7 @@ class GiteaClient:
         if not password:
             import secrets
             password = secrets.token_urlsafe(16)
-            logger.info("Generated Gitea admin password: %s", password)
+            logger.info("Generated Gitea admin password (see .env file)")
 
         cmd = [
             str(gitea_bin),
