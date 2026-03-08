@@ -303,9 +303,10 @@ async def save_settings(
     from pathlib import Path
 
     env_lines = [
-        f"HF_TOKEN={hf_token}",
         f"TIER1_PATH={tier1_path}",
     ]
+    if hf_token:
+        env_lines.insert(0, f"HF_TOKEN={hf_token}")
     if tier2_path:
         env_lines.append(f"TIER2_PATH={tier2_path}")
     env_lines.extend([
@@ -452,8 +453,9 @@ def create_app() -> gr.Blocks:
         with gr.Tab("Settings"):
             with gr.Column():
                 s_token = gr.Textbox(
-                    label="HF_TOKEN", type="password",
-                    value=config.hf_token.get_secret_value() or "",
+                    label="HF_TOKEN (leave blank to keep existing)",
+                    type="password",
+                    placeholder="Enter new token to change, or leave blank to keep existing",
                 )
                 s_tier1 = gr.Textbox(
                     label="DRIVE_1_PATH",
