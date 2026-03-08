@@ -21,10 +21,17 @@ def load_config() -> AppConfig:
     load_dotenv()
 
     env = os.environ
-    tier2 = env.get("TIER2_PATH")
 
+    hf_token = env.get("HF_TOKEN", "")
+    if not hf_token:
+        logger.warning(
+            "HF_TOKEN is not set. Hugging Face operations will fail. "
+            "Run setup or add HF_TOKEN to .env"
+        )
+
+    tier2 = env.get("TIER2_PATH")
     return AppConfig(
-        hf_token=env.get("HF_TOKEN", ""),
+        hf_token=hf_token,
         tier1_path=Path(env.get("TIER1_PATH", "./downloads")).expanduser().resolve(),
         tier2_path=Path(tier2).expanduser().resolve() if tier2 else None,
         tier_threshold_percent=int(env.get("TIER_THRESHOLD_PERCENT", "10")),

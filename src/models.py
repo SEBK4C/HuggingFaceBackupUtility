@@ -2,12 +2,31 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field, HttpUrl, SecretStr
+from pydantic import BaseModel, Field, HttpUrl, SecretStr, field_validator
+
+
+_REPO_ID_PATTERN = re.compile(r"^[a-zA-Z0-9._-]+(/[a-zA-Z0-9._-]+)?$")
+
+
+def _validate_repo_id(v: str) -> str:
+    """Validate repo_id matches HF Hub naming conventions."""
+    v = v.strip()
+    if not v:
+        raise ValueError("repo_id must not be empty")
+    if len(v) > 200:
+        raise ValueError("repo_id too long")
+    if not _REPO_ID_PATTERN.match(v):
+        raise ValueError(
+            f"Invalid repo_id '{v}'. Expected format: 'org/name' with "
+            "alphanumeric characters, dots, hyphens, and underscores only."
+        )
+    return v
 
 
 # ---------------------------------------------------------------------------
@@ -109,6 +128,11 @@ class CloneRequest(BaseModel):
     revision: str = "main"
     force_tier: Literal["tier1", "tier2"] | None = None
 
+    @field_validator("repo_id")
+    @classmethod
+    def check_repo_id(cls, v: str) -> str:
+        return _validate_repo_id(v)
+
 
 class CloneProgress(BaseModel):
     """Yielded during streaming clone operations."""
@@ -139,6 +163,11 @@ class CloneResult(BaseModel):
 class DiffRequest(BaseModel):
     repo_id: str
 
+    @field_validator("repo_id")
+    @classmethod
+    def check_repo_id(cls, v: str) -> str:
+        return _validate_repo_id(v)
+
 
 class FileDiff(BaseModel):
     filename: str
@@ -165,6 +194,11 @@ class MigrateRequest(BaseModel):
     target_tier: Literal["tier1", "tier2"]
     files: list[str] | None = None
 
+    @field_validator("repo_id")
+    @classmethod
+    def check_repo_id(cls, v: str) -> str:
+        return _validate_repo_id(v)
+
 
 class MigrateResult(BaseModel):
     repo_id: str
@@ -181,6 +215,11 @@ class PruneRequest(BaseModel):
     delete_from_gitea: bool = True
     scrub_lfs_blobs: bool = True
     dry_run: bool = False
+
+    @field_validator("repo_id")
+    @classmethod
+    def check_repo_id(cls, v: str) -> str:
+        return _validate_repo_id(v)
 
 
 class PruneResult(BaseModel):

@@ -177,8 +177,12 @@ def write_migration_journal(
         "operation": operation,
         "started_at": time.time(),
     }
-    with open(journal, "w") as f:
+    tmp = journal.with_suffix(".tmp")
+    with open(tmp, "w") as f:
         json.dump(entry, f)
+        f.flush()
+        os.fsync(f.fileno())
+    tmp.rename(journal)
 
 
 def clear_migration_journal(config: AppConfig) -> None:
