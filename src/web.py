@@ -302,6 +302,15 @@ async def save_settings(
 ):
     from pathlib import Path
 
+    # Strip newlines to prevent env-file injection
+    def _sanitize(v: str) -> str:
+        return str(v).replace("\r", "").replace("\n", "")
+
+    hf_token = _sanitize(hf_token)
+    tier1_path = _sanitize(tier1_path)
+    tier2_path = _sanitize(tier2_path)
+    log_level = _sanitize(log_level)
+
     env_lines = [
         f"HF_TOKEN={hf_token}",
         f"TIER1_PATH={tier1_path}",
@@ -495,7 +504,7 @@ def launch_web(port: int = 7860, share: bool = False):
     """Entry point called by main.py."""
     app = create_app()
     app.launch(
-        server_name="0.0.0.0",
+        server_name="127.0.0.1",
         server_port=port,
         share=share,
     )
