@@ -5,7 +5,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import shlex
+import stat
 import subprocess
+import tempfile
 from pathlib import Path
 
 import httpx
@@ -119,7 +122,7 @@ class GiteaClient:
             "--config", "./gitea-data/app.ini",
         ]
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(
             None,
             lambda: subprocess.run(cmd, capture_output=True, text=True),
@@ -224,7 +227,9 @@ class GiteaClient:
         owner = self.config.gitea_admin_user
         password = self.config.gitea_admin_password.get_secret_value()
         port = self.config.gitea_port
-        remote_url = f"http://{owner}:{password}@localhost:{port}/{owner}/{gitea_repo_name}.git"
+        # Do NOT embed password in URL — it would be stored in .git/config and
+        # visible in process listings. Use GIT_ASKPASS instead.
+        remote_url = f"http://{owner}@localhost:{port}/{owner}/{gitea_repo_name}.git"
 
         if lfs_patterns is None:
             lfs_patterns = [
@@ -232,55 +237,68 @@ class GiteaClient:
                 "*.pt", "*.pth", "*.h5",
             ]
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         # Ensure .bin/ (local git-lfs) is on PATH for subprocess calls
         env = os.environ.copy()
         local_bin = str(Path(".bin").resolve())
         env["PATH"] = local_bin + os.pathsep + env.get("PATH", "")
 
-        async def run_git(*args: str, check: bool = True) -> subprocess.CompletedProcess:
-            cmd = ["git"] + list(args)
-            result = await loop.run_in_executor(
-                None,
-                lambda: subprocess.run(
-                    cmd, cwd=str(work_dir), capture_output=True, text=True,
-                    env=env,
-                ),
-            )
-            if check and result.returncode != 0:
-                raise GiteaError(f"git {' '.join(args)} failed: {result.stderr}")
-            return result
+        # Pass credentials via GIT_ASKPASS: a temporary executable script that
+        # prints the password.  This avoids storing credentials in .git/config
+        # or exposing them in the process argument list.
+        askpass_fd, askpass_path = tempfile.mkstemp(suffix=".sh")
+        try:
+            with os.fdopen(askpass_fd, "w") as f:
+                f.write(f"#!/bin/sh\nprintf '%s\\n' {shlex.quote(password)}\n")
+            os.chmod(askpass_path, stat.S_IRWXU)  # 0o700 — owner-only execute
+            env["GIT_ASKPASS"] = askpass_path
+            env["GIT_TERMINAL_PROMPT"] = "0"  # never fall back to interactive prompt
 
-        # Init (safe to re-run)
-        await run_git("init", "--initial-branch=main", check=False)
-        await run_git("lfs", "install", "--local")
+            async def run_git(*args: str, check: bool = True) -> subprocess.CompletedProcess:
+                cmd = ["git"] + list(args)
+                result = await loop.run_in_executor(
+                    None,
+                    lambda: subprocess.run(
+                        cmd, cwd=str(work_dir), capture_output=True, text=True,
+                        env=env,
+                    ),
+                )
+                if check and result.returncode != 0:
+                    raise GiteaError(f"git {' '.join(args)} failed: {result.stderr}")
+                return result
 
-        # Track LFS patterns
-        for pattern in lfs_patterns:
-            await run_git("lfs", "track", pattern)
+            # Init (safe to re-run)
+            await run_git("init", "--initial-branch=main", check=False)
+            await run_git("lfs", "install", "--local")
 
-        await run_git("add", "-A")
+            # Track LFS patterns
+            for pattern in lfs_patterns:
+                await run_git("lfs", "track", pattern)
 
-        # Commit (skip if nothing to commit)
-        status = await run_git("status", "--porcelain")
-        if status.stdout.strip():
-            await run_git("commit", "-m", commit_message)
-        else:
-            # Check if there are any commits at all
-            head = await run_git("rev-parse", "HEAD", check=False)
-            if head.returncode != 0:
-                await run_git("commit", "--allow-empty", "-m", commit_message)
+            await run_git("add", "-A")
 
-        # Set remote (update if exists)
-        existing = await run_git("remote", "get-url", "origin", check=False)
-        if existing.returncode == 0:
-            await run_git("remote", "set-url", "origin", remote_url)
-        else:
-            await run_git("remote", "add", "origin", remote_url)
+            # Commit (skip if nothing to commit)
+            status = await run_git("status", "--porcelain")
+            if status.stdout.strip():
+                await run_git("commit", "-m", commit_message)
+            else:
+                # Check if there are any commits at all
+                head = await run_git("rev-parse", "HEAD", check=False)
+                if head.returncode != 0:
+                    await run_git("commit", "--allow-empty", "-m", commit_message)
 
-        await run_git("push", "-u", "origin", "main", "--force")
+            # Set remote (update if exists)
+            existing = await run_git("remote", "get-url", "origin", check=False)
+            if existing.returncode == 0:
+                await run_git("remote", "set-url", "origin", remote_url)
+            else:
+                await run_git("remote", "add", "origin", remote_url)
 
-        # Get commit SHA
-        result = await run_git("rev-parse", "HEAD")
-        return result.stdout.strip()
+            await run_git("push", "-u", "origin", "main", "--force")
+
+            # Get commit SHA
+            result = await run_git("rev-parse", "HEAD")
+            return result.stdout.strip()
+        finally:
+            os.unlink(askpass_path)
